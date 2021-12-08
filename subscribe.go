@@ -106,7 +106,9 @@ func (h *Hub) registerSubscriber(w http.ResponseWriter, r *http.Request) *Subscr
 	s.SetTopics(topics, privateTopics)
 
 	h.dispatchSubscriptionUpdate(s, true)
-	if err := h.transport.AddSubscriber(s); err != nil {
+	if err := h.transport.AddSubscriber(s); err == nil {
+		h.dispatchSubscriptionUpdate(s, true)
+	} else {
 		http.Error(w, http.StatusText(http.StatusServiceUnavailable), http.StatusServiceUnavailable)
 		h.dispatchSubscriptionUpdate(s, false)
 		if c := h.logger.Check(zap.ErrorLevel, "Unable to add subscriber"); c != nil {

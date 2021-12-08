@@ -9,6 +9,7 @@ import (
 
 	"github.com/gofrs/uuid"
 	uritemplate "github.com/yosida95/uritemplate/v3"
+	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -76,7 +77,13 @@ func (s *Subscriber) Dispatch(u *Update, fromHistory bool) bool {
 		return false
 	}
 
-	s.out <- u
+	select {
+	case s.out <- u:
+	default:
+		s.logger.Error("error when dispatching the update", zap.Any("update", u), zap.Any("subscriber", s))
+
+		return false
+	}
 
 	return true
 }
