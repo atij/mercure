@@ -96,7 +96,7 @@ func NewRedisTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport
 }
 
 func subscribeToUpdate(t *RedisTransport) {
-	pubsub := t.client.Subscribe(t.ctx, "update")
+	pubsub := t.client.Subscribe(t.ctx, bucket_name)
 	ch := pubsub.Channel()
 	for msg := range ch {
 		var update *Update
@@ -149,7 +149,7 @@ func (t *RedisTransport) Dispatch(update *Update) error {
 	}
 
 	// publish in pubsub for others mercure instances to consume the update and dispatch it to its subscribers
-	if err := t.client.Publish(t.ctx, "update", updateJSON).Err(); err != nil {
+	if err := t.client.Publish(t.ctx, bucket_name, updateJSON).Err(); err != nil {
 		return fmt.Errorf("error when publishing update: %w", err)
 	}
 
