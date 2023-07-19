@@ -58,7 +58,9 @@ func (h *Hub) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 			}
 			heartbeatTimer.Reset(h.heartbeat)
 		case update, ok := <-s.Receive():
+			h.logger.Info("Subscriber:received update")
 			if !ok || !h.write(w, s, newSerializedUpdate(update).event) {
+				h.logger.Info("Subscriber:received not ok")
 				return
 			}
 			if heartbeatTimer != nil {
