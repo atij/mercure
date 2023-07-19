@@ -116,8 +116,6 @@ func subscribeToUpdate(t *RedisTransport) {
 
 func getRedisLastEventID(ctx context.Context, client *redis.Client, bucketName string) string {
 	lastEventID := EarliestLastEventID
-
-	t.logger.Info("getRedisLastEventID:LIndex")
 	lastValue, err := client.LIndex(ctx, bucketName, 0).Result()
 	if err == nil {
 		var lastUpdate *Update
