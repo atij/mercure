@@ -70,10 +70,9 @@ func NewRedisTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport
 		return nil, &TransportError{u.Redacted(), "missing path", err}
 	}
 
-	client := redis.NewClient(&redis.Options{
-		Addr:     path,
-		Password: "", // no password set
-		DB:       0,  // use default DB
+	client := redis.NewFailoverClient(&redis.FailoverOptions{
+		MasterName:    q.Get("master"),
+		SentinelAddrs: []string{path},
 	})
 
 	ctx := context.Background()
