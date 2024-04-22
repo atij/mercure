@@ -138,7 +138,10 @@ func (h *Hub) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 			// Cleanly close the HTTP connection before the write deadline to prevent client-side errors
 			return
 		case update, ok := <-s.Receive():
+			h.logger.Info("Subscriber:received update")
 			if !ok || !h.write(rc, newSerializedUpdate(update).event) {
+				h.logger.Info("Subscriber:received not ok")
+
 				return
 			}
 			if heartbeatTimer != nil {
