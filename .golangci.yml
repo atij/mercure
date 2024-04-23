@@ -10,18 +10,30 @@ linters:
     - wsl
     - gomnd
     - testpackage
-    - exhaustivestruct
+    - exhaustruct
     - paralleltest
     - cyclop
     - forcetypeassert
     - tagliatelle
     - varnamelen
+    - nonamedreturns
+    - testableexamples
+    - musttag
+    - depguard
+    # Weird issues
+    - nolintlint
 
     # deprecated
     - interfacer
     - maligned
     - scopelint
     - golint
+    - exhaustivestruct
+    - varcheck
+    - ifshort
+    - deadcode
+    - nosnakecase
+    - structcheck
 
 issues:
   exclude-rules:
@@ -32,3 +44,4 @@ issues:
         - godox
         - noctx
         - wrapcheck
+        - goconst

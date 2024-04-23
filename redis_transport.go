@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"sync"
 
-	redis "github.com/go-redis/redis/v8"
+	redis "github.com/redis/go-redis/v9"
 	"go.uber.org/zap"
 )
 
@@ -37,7 +37,7 @@ type RedisTransport struct {
 }
 
 // NewRedisTransport create a new RedisTransport.
-func NewRedisTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport, error) { //nolint:ireturn
+func NewRedisTransport(u *url.URL, l Logger) (Transport, error) { //nolint:ireturn
 	var err error
 	q := u.Query()
 	bucketName := defaultRedisBucketName
@@ -250,20 +250,10 @@ func (t *RedisTransport) RemoveSubscriber(s *Subscriber) error {
 
 // GetSubscribers get the list of active subscribers.
 func (t *RedisTransport) GetSubscribers() (string, []*Subscriber, error) {
-	t.logger.Info("GetSubscribers:RLock")
 	t.RLock()
 	defer t.RUnlock()
 
-	t.logger.Info("GetSubscribers:append")
-	var subscribers []*Subscriber
-	t.subscribers.Walk(0, func(s *Subscriber) bool {
-		subscribers = append(subscribers, s)
-
-		return true
-	})
-	t.logger.Info("GetSubscribers:return")
-
-	return t.lastEventID, subscribers, nil
+	return t.lastEventID, getSubscribers(t.subscribers), nil
 }
 
 func (t *RedisTransport) dispatchHistory(s *Subscriber) {

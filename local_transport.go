@@ -19,7 +19,7 @@ type LocalTransport struct {
 }
 
 // NewLocalTransport create a new LocalTransport.
-func NewLocalTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport, error) { //nolint:ireturn
+func NewLocalTransport(_ *url.URL, _ Logger) (Transport, error) { //nolint:ireturn
 	return &LocalTransport{
 		subscribers: NewSubscriberList(1e5),
 		closed:      make(chan struct{}),
@@ -86,14 +86,7 @@ func (t *LocalTransport) GetSubscribers() (string, []*Subscriber, error) {
 	t.RLock()
 	defer t.RUnlock()
 
-	var subscribers []*Subscriber
-	t.subscribers.Walk(0, func(s *Subscriber) bool {
-		subscribers = append(subscribers, s)
-
-		return true
-	})
-
-	return t.lastEventID, subscribers, nil
+	return t.lastEventID, getSubscribers(t.subscribers), nil
 }
 
 // Close closes the Transport.

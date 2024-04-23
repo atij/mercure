@@ -1,13 +1,25 @@
 # Learn how to configure the Mercure.rocks Hub on https://mercure.rocks/docs/hub/config
 {
+	order mercure after encode
+
 	{$GLOBAL_OPTIONS}
 }
 
-{$SERVER_NAME:localhost}
+{$CADDY_EXTRA_CONFIG}
 
-log
+{$SERVER_NAME:localhost} {
+	log {
+		format filter {
+			# Defaults to json while waiting for https://github.com/caddyserver/caddy/pull/5980
+			wrap json
+			fields {
+				uri query {
+					replace authorization REDACTED
+				}
+			}
+		}
+	}
 
-route {
 	encode zstd gzip
 
 	mercure {
@@ -21,7 +33,23 @@ route {
 		{$MERCURE_EXTRA_DIRECTIVES}
 	}
 
-	respond /healthz 200
+	{$CADDY_SERVER_EXTRA_DIRECTIVES}
 
+	skip_log /robots.txt
+	skip_log /healthz
+	skip_log /favicon.ico
+
+	header / Content-Type "text/html; charset=utf-8"
+	respond / `<!DOCTYPE html>
+<html lang=en>
+<meta charset="utf-8">
+<meta name="robots" content="noindex">
+<title>Welcome to Mercure</title>
+<h1>Welcome to Mercure</h1>
+<p>The URL of your hub is <code>/.well-known/mercure</code>.
+Read the documentation on <a href="https://mercure.rocks">Mercure.rocks, real-time apps made easy</a>.`
+	respond /robots.txt `User-agent: *
+Disallow: /`
+	respond /healthz 200
 	respond "Not Found" 404
 }

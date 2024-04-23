@@ -2,65 +2,146 @@ package mercure
 
 import (
 	"encoding/json"
-	"fmt"
-	"io"
+	"errors"
 	"net/http"
 	"time"
 
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 )
 
-// SubscribeHandler creates a keep alive connection and sends the events to the subscribers.
-func (h *Hub) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
-	assertFlusher(w)
+type responseController struct {
+	http.ResponseController
+	rw http.ResponseWriter
+	// disconnectionTime is the JWT expiration date minus hub.dispatchTimeout, or time.Now() plus hub.writeTimeout minus hub.dispatchTimeout
+	disconnectionTime time.Time
+	// writeDeadline is the JWT expiration date or time.Now() + hub.writeTimeout
+	writeDeadline time.Time
+	hub           *Hub
+	subscriber    *Subscriber
+}
 
-	s := h.registerSubscriber(w, r)
+func (rc *responseController) setDispatchWriteDeadline() bool {
+	if rc.hub.dispatchTimeout == 0 {
+		return true
+	}
+
+	deadline := time.Now().Add(rc.hub.dispatchTimeout)
+	if deadline.After(rc.writeDeadline) {
+		return true
+	}
+
+	if err := rc.SetWriteDeadline(deadline); err != nil {
+		if c := rc.hub.logger.Check(zap.ErrorLevel, "Unable to set dispatch write deadline"); c != nil {
+			c.Write(zap.Object("subscriber", rc.subscriber), zap.Error(err))
+		}
+
+		return false
+	}
+
+	return true
+}
+
+func (rc *responseController) setDefaultWriteDeadline() bool {
+	if err := rc.SetWriteDeadline(rc.writeDeadline); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			panic(err)
+		}
+
+		if c := rc.hub.logger.Check(zap.InfoLevel, "Error while setting default write deadline"); c != nil {
+			c.Write(zap.Object("subscriber", rc.subscriber), zap.Error(err))
+		}
+
+		return false
+	}
+
+	return true
+}
+
+func (rc *responseController) flush() bool {
+	if err := rc.Flush(); err != nil {
+		if errors.Is(err, http.ErrNotSupported) {
+			panic(err)
+		}
+
+		if c := rc.hub.logger.Check(zap.InfoLevel, "Unable to flush"); c != nil {
+			c.Write(zap.Object("subscriber", rc.subscriber), zap.Error(err))
+		}
+
+		return false
+	}
+
+	return true
+}
+
+func (h *Hub) newResponseController(w http.ResponseWriter, s *Subscriber) *responseController {
+	wd := h.getWriteDeadline(s)
+
+	return &responseController{*http.NewResponseController(w), w, wd.Add(-h.dispatchTimeout), wd, h, s} // nolint:bodyclose
+}
+
+func (h *Hub) getWriteDeadline(s *Subscriber) (deadline time.Time) {
+	if h.writeTimeout != 0 {
+		deadline = time.Now().Add(h.writeTimeout)
+	}
+
+	if s.Claims != nil && s.Claims.ExpiresAt != nil && (deadline == time.Time{} || s.Claims.ExpiresAt.Time.Before(deadline)) {
+		deadline = s.Claims.ExpiresAt.Time
+	}
+
+	return
+}
+
+// SubscribeHandler creates a keep alive connection and sends the events to the subscribers.
+//
+//nolint:funlen,gocognit
+func (h *Hub) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
+	s, rc := h.registerSubscriber(w, r)
 	if s == nil {
 		return
 	}
 	defer h.shutdown(s)
 
-	var heartbeatTimer *time.Timer
-	var heartbeatTimerC <-chan time.Time
+	rc.setDefaultWriteDeadline()
+
+	var (
+		heartbeatTimer      *time.Timer
+		heartbeatTimerC     <-chan time.Time
+		disconnectionTimerC <-chan time.Time
+	)
+
 	if h.heartbeat != 0 {
 		heartbeatTimer = time.NewTimer(h.heartbeat)
 		defer heartbeatTimer.Stop()
 		heartbeatTimerC = heartbeatTimer.C
 	}
-
-	var writeTimer *time.Timer
-	var writeTimerC <-chan time.Time
 	if h.writeTimeout != 0 {
-		writeTimer = time.NewTimer(h.writeTimeout - h.dispatchTimeout)
-		defer writeTimer.Stop()
-		writeTimerC = writeTimer.C
+		disconnectionTimer := time.NewTimer(time.Until(rc.disconnectionTime))
+		defer disconnectionTimer.Stop()
+		disconnectionTimerC = disconnectionTimer.C
 	}
 
 	for {
 		select {
 		case <-r.Context().Done():
-			if c := h.logger.Check(zap.DebugLevel, "connection closed by the client"); c != nil {
-				c.Write(zap.Object("subscriber", s))
-			}
-
-			return
-		case <-writeTimerC:
-			if c := h.logger.Check(zap.DebugLevel, "write timeout: close the connection"); c != nil {
+			if c := h.logger.Check(zap.DebugLevel, "Connection closed by the client"); c != nil {
 				c.Write(zap.Object("subscriber", s))
 			}
 
 			return
 		case <-heartbeatTimerC:
 			// Send a SSE comment as a heartbeat, to prevent issues with some proxies and old browsers
-			if !h.write(w, s, ":\n") {
+			if !h.write(rc, ":\n") {
 				return
 			}
 			heartbeatTimer.Reset(h.heartbeat)
+		case <-disconnectionTimerC:
+			// Cleanly close the HTTP connection before the write deadline to prevent client-side errors
+			return
 		case update, ok := <-s.Receive():
 			h.logger.Info("Subscriber:received update")
-			if !ok || !h.write(w, s, newSerializedUpdate(update).event) {
+			if !ok || !h.write(rc, newSerializedUpdate(update).event) {
 				h.logger.Info("Subscriber:received not ok")
+
 				return
 			}
 			if heartbeatTimer != nil {
@@ -69,7 +150,7 @@ func (h *Hub) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 				}
 				heartbeatTimer.Reset(h.heartbeat)
 			}
-			if c := h.logger.Check(zap.InfoLevel, "Update sent"); c != nil {
+			if c := h.logger.Check(zap.DebugLevel, "Update sent"); c != nil {
 				c.Write(zap.Object("subscriber", s), zap.Object("update", update))
 			}
 		}
@@ -77,25 +158,27 @@ func (h *Hub) SubscribeHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 // registerSubscriber initializes the connection.
-func (h *Hub) registerSubscriber(w http.ResponseWriter, r *http.Request) *Subscriber {
-	s := NewSubscriber(retrieveLastEventID(r), h.logger)
+func (h *Hub) registerSubscriber(w http.ResponseWriter, r *http.Request) (*Subscriber, *responseController) {
+	s := NewSubscriber(retrieveLastEventID(r, h.opt, h.logger), h.logger)
 	s.Debug = h.debug
 	s.RemoteAddr = r.RemoteAddr
 	var privateTopics []string
+	var claims *claims
 
-	if h.subscriberJWT != nil {
-		claims, err := authorize(r, h.subscriberJWT, nil, h.cookieName)
+	if h.subscriberJWTKeyFunc != nil {
+		var err error
+		claims, err = authorize(r, h.subscriberJWTKeyFunc, nil, h.cookieName)
 		if claims != nil {
 			s.Claims = claims
 			privateTopics = claims.Mercure.Subscribe
 		}
 		if err != nil || (claims == nil && !h.anonymous) {
 			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-			if c := h.logger.Check(zap.InfoLevel, "Subscriber unauthorized"); c != nil {
+			if c := h.logger.Check(zap.DebugLevel, "Subscriber unauthorized"); c != nil {
 				c.Write(zap.Object("subscriber", s), zap.Error(err))
 			}
 
-			return nil
+			return nil, nil
 		}
 	}
 
@@ -103,7 +186,7 @@ func (h *Hub) registerSubscriber(w http.ResponseWriter, r *http.Request) *Subscr
 	if len(topics) == 0 {
 		http.Error(w, "Missing \"topic\" parameter.", http.StatusBadRequest)
 
-		return nil
+		return nil, nil
 	}
 	s.SetTopics(topics, privateTopics)
 
@@ -117,21 +200,28 @@ func (h *Hub) registerSubscriber(w http.ResponseWriter, r *http.Request) *Subscr
 			c.Write(zap.Object("subscriber", s), zap.Error(err))
 		}
 
-		return nil
+		return nil, nil
 	}
 
-	sendHeaders(w, s)
+	h.sendHeaders(w, s)
+	rc := h.newResponseController(w, s)
+	rc.flush()
 
 	if c := h.logger.Check(zap.InfoLevel, "New subscriber"); c != nil {
-		c.Write(zap.Object("subscriber", s))
+		fields := []LogField{zap.Object("subscriber", s)}
+		if claims != nil && h.logger.Level() == zap.DebugLevel {
+			fields = append(fields, zap.Reflect("payload", claims.Mercure.Payload))
+		}
+
+		c.Write(fields...)
 	}
 	h.metrics.SubscriberConnected(s)
 
-	return s
+	return s, rc
 }
 
 // sendHeaders sends correct HTTP headers to create a keep-alive connection.
-func sendHeaders(w http.ResponseWriter, s *Subscriber) {
+func (h *Hub) sendHeaders(w http.ResponseWriter, s *Subscriber) {
 	// Keep alive, useful only for HTTP 1 clients https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Keep-Alive
 	w.Header().Set("Connection", "keep-alive")
 
@@ -152,49 +242,51 @@ func sendHeaders(w http.ResponseWriter, s *Subscriber) {
 
 	// Write a comment in the body
 	// Go currently doesn't provide a better way to flush the headers
-	fmt.Fprint(w, ":\n")
-	w.(http.Flusher).Flush()
+	w.Write([]byte{':', '\n'})
 }
 
 // retrieveLastEventID extracts the Last-Event-ID from the corresponding HTTP header with a fallback on the query parameter.
-func retrieveLastEventID(r *http.Request) string {
+func retrieveLastEventID(r *http.Request, opt *opt, logger Logger) string {
 	if id := r.Header.Get("Last-Event-ID"); id != "" {
 		return id
 	}
 
-	return r.URL.Query().Get("Last-Event-ID")
+	query := r.URL.Query()
+	if id := query.Get("lastEventID"); id != "" {
+		return id
+	}
+
+	if legacyEventIDValues, present := query["Last-Event-ID"]; present {
+		if opt.isBackwardCompatiblyEnabledWith(7) {
+			logger.Info("Deprecated: the 'Last-Event-ID' query parameter is deprecated since the version 8 of the protocol, use 'lastEventID' instead.")
+
+			if len(legacyEventIDValues) != 0 {
+				return legacyEventIDValues[0]
+			}
+		} else {
+			logger.Info("Unsupported: the 'Last-Event-ID' query parameter is not supported anymore, use 'lastEventID' instead or enable backward compatibility with version 7 of the protocol.")
+		}
+	}
+
+	return ""
 }
 
 // Write sends the given string to the client.
-// It returns false if the dispatch timed out.
-// The current write cannot be cancelled because of https://github.com/golang/go/issues/16100
-func (h *Hub) write(w io.Writer, s zapcore.ObjectMarshaler, data string) bool {
-	if h.dispatchTimeout == 0 {
-		fmt.Fprint(w, data)
-		w.(http.Flusher).Flush()
-
-		return true
+// It returns false if the subscriber has been disconnected (e.g. timeout).
+func (h *Hub) write(rc *responseController, data string) bool {
+	if !rc.setDispatchWriteDeadline() {
+		return false
 	}
 
-	done := make(chan struct{})
-	go func() {
-		fmt.Fprint(w, data)
-		w.(http.Flusher).Flush()
-		close(done)
-	}()
-
-	timeout := time.NewTimer(h.dispatchTimeout)
-	defer timeout.Stop()
-	select {
-	case <-done:
-		return true
-	case <-timeout.C:
-		if c := h.logger.Check(zap.WarnLevel, "Dispatch timeout reached"); c != nil {
-			c.Write(zap.Object("subscriber", s))
+	if _, err := rc.rw.Write([]byte(data)); err != nil {
+		if c := h.logger.Check(zap.DebugLevel, "Error writing to client"); c != nil {
+			c.Write(zap.Object("subscriber", rc.subscriber), zap.Error(err))
 		}
 
 		return false
 	}
+
+	return rc.flush() && rc.setDefaultWriteDeadline()
 }
 
 func (h *Hub) shutdown(s *Subscriber) {
@@ -226,11 +318,5 @@ func (h *Hub) dispatchSubscriptionUpdate(s *Subscriber, active bool) {
 			Event:   Event{Data: string(json)},
 		}
 		h.transport.Dispatch(u)
-	}
-}
-
-func assertFlusher(w http.ResponseWriter) {
-	if _, ok := w.(http.Flusher); !ok {
-		panic("http.ResponseWriter must be an instance of http.Flusher")
 	}
 }

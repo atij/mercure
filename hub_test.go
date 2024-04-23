@@ -1,14 +1,16 @@
 package mercure
 
 import (
-	"errors"
+	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"os/exec"
 	"sync"
 	"testing"
+	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -24,6 +26,12 @@ func TestNewHub(t *testing.T) {
 	h := createDummy()
 
 	assert.IsType(t, &viper.Viper{}, h.config)
+
+	assert.False(t, h.opt.anonymous)
+	assert.Equal(t, defaultCookieName, h.opt.cookieName)
+	assert.Equal(t, 40*time.Second, h.opt.heartbeat)
+	assert.Equal(t, 5*time.Second, h.opt.dispatchTimeout)
+	assert.Equal(t, 600*time.Second, h.opt.writeTimeout)
 }
 
 func TestNewHubWithConfig(t *testing.T) {
@@ -32,7 +40,7 @@ func TestNewHubWithConfig(t *testing.T) {
 		WithSubscriberJWT([]byte("bar"), jwt.SigningMethodHS256.Name),
 	)
 	require.NotNil(t, h)
-	require.Nil(t, err)
+	require.NoError(t, err)
 }
 
 func TestNewHubValidationError(t *testing.T) {
@@ -63,7 +71,7 @@ func TestStartCrash(t *testing.T) {
 	err := cmd.Run()
 
 	var e *exec.ExitError
-	require.True(t, errors.As(err, &e))
+	require.ErrorAs(t, err, &e)
 	assert.False(t, e.Success())
 }
 
@@ -94,9 +102,9 @@ func TestStop(t *testing.T) {
 	for i := 0; i < numberOfSubscribers; i++ {
 		go func() {
 			defer wg.Done()
-			req := httptest.NewRequest("GET", defaultHubURL+"?topic=http://example.com/foo", nil)
+			req := httptest.NewRequest(http.MethodGet, defaultHubURL+"?topic=http://example.com/foo", nil)
 
-			w := httptest.NewRecorder()
+			w := newSubscribeRecorder()
 			hub.SubscribeHandler(w, req)
 
 			r := w.Result()
@@ -106,6 +114,123 @@ func TestStop(t *testing.T) {
 	}
 
 	wg.Wait()
+}
+
+func TestWithProtocolVersionCompatibility(t *testing.T) {
+	op := &opt{}
+
+	assert.False(t, op.isBackwardCompatiblyEnabledWith(7))
+
+	o := WithProtocolVersionCompatibility(7)
+	require.NoError(t, o(op))
+	assert.Equal(t, 7, op.protocolVersionCompatibility)
+	assert.True(t, op.isBackwardCompatiblyEnabledWith(7))
+	assert.True(t, op.isBackwardCompatiblyEnabledWith(8))
+	assert.False(t, op.isBackwardCompatiblyEnabledWith(6))
+}
+
+func TestWithProtocolVersionCompatibilityVersions(t *testing.T) {
+	op := &opt{}
+
+	testCases := []struct {
+		version int
+		ok      bool
+	}{
+		{5, false},
+		{6, false},
+		{7, true},
+		{8, false},
+	}
+
+	for _, tc := range testCases {
+		t.Run(fmt.Sprintf("version %d", tc.version), func(t *testing.T) {
+			o := WithProtocolVersionCompatibility(tc.version)
+
+			if tc.ok {
+				require.NoError(t, o(op))
+			} else {
+				require.Error(t, o(op))
+			}
+		})
+	}
+}
+
+func TestWithPublisherJWTKeyFunc(t *testing.T) {
+	op := &opt{}
+
+	o := WithPublisherJWTKeyFunc(func(_ *jwt.Token) (interface{}, error) { return []byte{}, nil })
+	require.NoError(t, o(op))
+	require.NotNil(t, op.publisherJWTKeyFunc)
+}
+
+func TestWithSubscriberJWTKeyFunc(t *testing.T) {
+	op := &opt{}
+
+	o := WithSubscriberJWTKeyFunc(func(_ *jwt.Token) (interface{}, error) { return []byte{}, nil })
+	require.NoError(t, o(op))
+	require.NotNil(t, op.subscriberJWTKeyFunc)
+}
+
+func TestWithDebug(t *testing.T) {
+	op := &opt{}
+
+	o := WithDebug()
+	require.NoError(t, o(op))
+	require.True(t, op.debug)
+}
+
+func TestWithUI(t *testing.T) {
+	op := &opt{}
+
+	o := WithUI()
+	require.NoError(t, o(op))
+	require.True(t, op.ui)
+}
+
+func TestOriginsValidator(t *testing.T) {
+	op := &opt{}
+
+	validOrigins := [][]string{
+		{"*"},
+		{"null"},
+		{"https://example.com"},
+		{"http://example.com:8000"},
+		{"https://example.com", "http://example.org"},
+		{"https://example.com", "*"},
+		{"null", "https://example.com:3000"},
+		{"capacitor://"},
+		{"capacitor://www.example.com"},
+		{"ionic://"},
+		{"foobar://"},
+	}
+
+	invalidOrigins := [][]string{
+		{"f"},
+		{"foo"},
+		{"https://example.com", "bar"},
+		{"https://example.com/"},
+		{"https://user@example.com"},
+		{"https://example.com:abc"},
+		{"https://example.com", "http://example.org/hello"},
+		{"https://example.com?query", "*"},
+		{"null", "https://example.com:3000#fragment"},
+	}
+
+	for _, origins := range validOrigins {
+		o := WithPublishOrigins(origins)
+		require.NoError(t, o(op), "error while not expected for %#v", origins)
+
+		o = WithCORSOrigins(origins)
+		require.NoError(t, o(op), "error while not expected for %#v", origins)
+	}
+
+	for _, origins := range invalidOrigins {
+		o := WithPublishOrigins(origins)
+		require.Error(t, o(op), "no error while expected for %#v", origins)
+
+		o = WithCORSOrigins(origins)
+		require.Error(t, o(op), "no error while expected for %#v", origins)
+	}
 }
 
 func createDummy(options ...Option) *Hub {
@@ -137,20 +262,22 @@ func createAnonymousDummy(options ...Option) *Hub {
 	return createDummy(options...)
 }
 
-func createDummyAuthorizedJWT(h *Hub, r role, topics []string) string {
+func createDummyAuthorizedJWT(r role, topics []string) string {
+	return createDummyAuthorizedJWTWithPayload(r, topics, struct {
+		Foo string `json:"foo"`
+	}{Foo: "bar"})
+}
+
+func createDummyAuthorizedJWTWithPayload(r role, topics []string, payload interface{}) string {
 	token := jwt.New(jwt.SigningMethodHS256)
 
 	var key []byte
 	switch r {
 	case rolePublisher:
 		token.Claims = &claims{Mercure: mercureClaim{Publish: topics}, RegisteredClaims: jwt.RegisteredClaims{}}
-		key = h.publisherJWT.key
+		key = []byte("publisher")
 
 	case roleSubscriber:
-		var payload struct {
-			Foo string `json:"foo"`
-		}
-		payload.Foo = "bar"
 		token.Claims = &claims{
 			Mercure: mercureClaim{
 				Subscribe: topics,
@@ -159,7 +286,7 @@ func createDummyAuthorizedJWT(h *Hub, r role, topics []string) string {
 			RegisteredClaims: jwt.RegisteredClaims{},
 		}
 
-		key = h.subscriberJWT.key
+		key = []byte("subscriber")
 	}
 
 	tokenString, _ := token.SignedString(key)

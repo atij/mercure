@@ -31,9 +31,10 @@ type subscriptionCollection struct {
 }
 
 const (
-	subscriptionURL          = defaultHubURL + "/subscriptions/{topic}/{subscriber}"
-	subscriptionsForTopicURL = defaultHubURL + "/subscriptions/{topic}"
-	subscriptionsURL         = defaultHubURL + "/subscriptions"
+	subscriptionsPath        = "/subscriptions"
+	subscriptionURL          = defaultHubURL + subscriptionsPath + "/{topic}/{subscriber}"
+	subscriptionsForTopicURL = defaultHubURL + subscriptionsPath + "/{topic}"
+	subscriptionsURL         = defaultHubURL + subscriptionsPath
 )
 
 func (h *Hub) SubscriptionsHandler(w http.ResponseWriter, r *http.Request) {
@@ -103,13 +104,10 @@ func (h *Hub) SubscriptionHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Hub) initSubscription(currentURL string, w http.ResponseWriter, r *http.Request) (lastEventID string, subscribers []*Subscriber, ok bool) {
-	if h.subscriberJWT != nil {
-		claims, err := authorize(r, h.subscriberJWT, nil, h.cookieName)
+	if h.subscriberJWTKeyFunc != nil {
+		claims, err := authorize(r, h.subscriberJWTKeyFunc, nil, h.cookieName)
 		if err != nil || claims == nil || claims.Mercure.Subscribe == nil || !canReceive(h.topicSelectorStore, []string{currentURL}, claims.Mercure.Subscribe) {
-			http.Error(w, http.StatusText(http.StatusUnauthorized), http.StatusUnauthorized)
-			if c := h.logger.Check(zap.InfoLevel, "Topic selectors not matched, not provided or authorization error"); c != nil {
-				c.Write(zap.String("remote_addr", r.RemoteAddr), zap.Error(err))
-			}
+			h.httpAuthorizationError(w, r, err)
 
 			return "", nil, false
 		}
@@ -128,7 +126,7 @@ func (h *Hub) initSubscription(currentURL string, w http.ResponseWriter, r *http
 		}
 		w.WriteHeader(http.StatusInternalServerError)
 
-		return
+		return lastEventID, subscribers, ok
 	}
 	if r.Header.Get("If-None-Match") == lastEventID {
 		w.WriteHeader(http.StatusNotModified)

@@ -1,7 +1,8 @@
 package mercure
 
 import (
-	"io/ioutil"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -10,7 +11,7 @@ import (
 )
 
 func TestEmptyBodyAndJWT(t *testing.T) {
-	req := httptest.NewRequest("GET", "http://example.com/demo/foo.jsonld", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/demo/foo.jsonld", nil)
 	w := httptest.NewRecorder()
 
 	h, _ := NewHub()
@@ -18,19 +19,20 @@ func TestEmptyBodyAndJWT(t *testing.T) {
 
 	resp := w.Result()
 	assert.Equal(t, "application/ld+json", resp.Header.Get("Content-Type"))
-	assert.Equal(t, []string{"<" + defaultHubURL + ">; rel=\"mercure\"", "<http://example.com/demo/foo.jsonld>; rel=\"self\""}, resp.Header["Link"])
+	assert.Equal(t, []string{"<" + defaultHubURL + linkSuffix, "<http://example.com/demo/foo.jsonld>; rel=\"self\""}, resp.Header["Link"])
 
 	cookie := resp.Cookies()[0]
 	assert.Equal(t, "mercureAuthorization", cookie.Name)
 	assert.Empty(t, cookie.Value)
 	assert.True(t, cookie.Expires.Before(time.Now()))
 
-	body, _ := ioutil.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "", string(body))
 }
 
 func TestBodyAndJWT(t *testing.T) {
-	req := httptest.NewRequest("GET", "http://example.com/demo/foo/bar.xml?body=<hello/>&jwt=token", nil)
+	req := httptest.NewRequest(http.MethodGet, "http://example.com/demo/foo/bar.xml?body=<hello/>&jwt=token", nil)
 	w := httptest.NewRecorder()
 
 	h, _ := NewHub()
@@ -38,13 +40,14 @@ func TestBodyAndJWT(t *testing.T) {
 
 	resp := w.Result()
 	assert.Contains(t, resp.Header.Get("Content-Type"), "xml") // Before Go 1.17, the charset wasn't set
-	assert.Equal(t, []string{"<" + defaultHubURL + ">; rel=\"mercure\"", "<http://example.com/demo/foo/bar.xml?body=<hello/>&jwt=token>; rel=\"self\""}, resp.Header["Link"])
+	assert.Equal(t, []string{"<" + defaultHubURL + linkSuffix, "<http://example.com/demo/foo/bar.xml?body=<hello/>&jwt=token>; rel=\"self\""}, resp.Header["Link"])
 
 	cookie := resp.Cookies()[0]
 	assert.Equal(t, "mercureAuthorization", cookie.Name)
 	assert.Equal(t, "token", cookie.Value)
 	assert.Empty(t, cookie.Expires)
 
-	body, _ := ioutil.ReadAll(resp.Body)
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
 	assert.Equal(t, "<hello/>", string(body))
 }

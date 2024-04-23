@@ -3,14 +3,25 @@
 package mercure
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"time"
 
-	"github.com/golang-jwt/jwt/v4"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
 )
+
+const (
+	DefaultWriteTimeout    = 600 * time.Second
+	DefaultDispatchTimeout = 5 * time.Second
+	DefaultHeartbeat       = 40 * time.Second
+)
+
+// ErrUnsupportedProtocolVersion is returned when the version passed is unsupported.
+var ErrUnsupportedProtocolVersion = errors.New("compatibility mode only supports protocol version 7")
 
 // Option instances allow to configure the library.
 type Option func(h *opt) error
@@ -105,37 +116,41 @@ func WithHeartbeat(interval time.Duration) Option {
 	}
 }
 
+// WithPublisherJWTKeyFunc sets the function to use to parse and verify the publisher JWT.
+func WithPublisherJWTKeyFunc(keyfunc jwt.Keyfunc) Option {
+	return func(o *opt) error {
+		o.publisherJWTKeyFunc = keyfunc
+
+		return nil
+	}
+}
+
+// WithSubscriberJWTKeyFunc sets the function to use to parse and verify the subscriber JWT.
+func WithSubscriberJWTKeyFunc(keyfunc jwt.Keyfunc) Option {
+	return func(o *opt) error {
+		o.subscriberJWTKeyFunc = keyfunc
+
+		return nil
+	}
+}
+
 // WithPublisherJWT sets the JWT key and the signing algorithm to use for publishers.
 func WithPublisherJWT(key []byte, alg string) Option {
 	return func(o *opt) error {
-		sm := jwt.GetSigningMethod(alg)
-		switch sm.(type) {
-		case *jwt.SigningMethodHMAC:
-		case *jwt.SigningMethodRSA:
-		default:
-			return ErrUnexpectedSigningMethod
-		}
+		keyfunc, err := createJWTKeyfunc(key, alg)
+		o.publisherJWTKeyFunc = keyfunc
 
-		o.publisherJWT = &jwtConfig{key, sm}
-
-		return nil
+		return err
 	}
 }
 
 // WithSubscriberJWT sets the JWT key and the signing algorithm to use for subscribers.
 func WithSubscriberJWT(key []byte, alg string) Option {
 	return func(o *opt) error {
-		sm := jwt.GetSigningMethod(alg)
-		switch sm.(type) {
-		case *jwt.SigningMethodHMAC:
-		case *jwt.SigningMethodRSA:
-		default:
-			return ErrUnexpectedSigningMethod
-		}
+		keyfunc, err := createJWTKeyfunc(key, alg)
+		o.subscriberJWTKeyFunc = keyfunc
 
-		o.subscriberJWT = &jwtConfig{key, sm}
-
-		return nil
+		return err
 	}
 }
 
@@ -148,9 +163,35 @@ func WithAllowedHosts(hosts []string) Option {
 	}
 }
 
+func validateOrigins(origins []string) error {
+	for _, origin := range origins {
+		switch origin {
+		case "*", "null":
+			continue
+		}
+
+		u, err := url.Parse(origin)
+		if err != nil ||
+			!u.IsAbs() ||
+			u.Opaque != "" ||
+			u.User != nil ||
+			u.Path != "" ||
+			u.RawQuery != "" ||
+			u.Fragment != "" {
+			return fmt.Errorf(`invalid origin, must be a URL having only a scheme, a host and optionally a port, "*" or "null": %w`, err)
+		}
+	}
+
+	return nil
+}
+
 // WithPublishOrigins sets the origins allowed to publish updates.
 func WithPublishOrigins(origins []string) Option {
 	return func(o *opt) error {
+		if err := validateOrigins(origins); err != nil {
+			return err
+		}
+
 		o.publishOrigins = origins
 
 		return nil
@@ -160,6 +201,10 @@ func WithPublishOrigins(origins []string) Option {
 // WithCORSOrigins sets the allowed CORS origins.
 func WithCORSOrigins(origins []string) Option {
 	return func(o *opt) error {
+		if err := validateOrigins(origins); err != nil {
+			return err
+		}
+
 		o.corsOrigins = origins
 
 		return nil
@@ -193,33 +238,47 @@ func WithCookieName(cookieName string) Option {
 	}
 }
 
-type jwtConfig struct {
-	key           []byte
-	signingMethod jwt.SigningMethod
+// WithProtocolVersionCompatibility sets the version of the Mercure protocol to be backward compatible with (only version 7 is supported).
+func WithProtocolVersionCompatibility(protocolVersionCompatibility int) Option {
+	return func(o *opt) error {
+		switch protocolVersionCompatibility {
+		case 7:
+			o.protocolVersionCompatibility = protocolVersionCompatibility
+
+			return nil
+		default:
+			return ErrUnsupportedProtocolVersion
+		}
+	}
 }
 
 // opt contains the available options.
 //
 // If you change this, also update the Caddy module and the documentation.
 type opt struct {
-	transport          Transport
-	topicSelectorStore *TopicSelectorStore
-	anonymous          bool
-	debug              bool
-	subscriptions      bool
-	ui                 bool
-	demo               bool
-	logger             Logger
-	writeTimeout       time.Duration
-	dispatchTimeout    time.Duration
-	heartbeat          time.Duration
-	publisherJWT       *jwtConfig
-	subscriberJWT      *jwtConfig
-	metrics            Metrics
-	allowedHosts       []string
-	publishOrigins     []string
-	corsOrigins        []string
-	cookieName         string
+	transport                    Transport
+	topicSelectorStore           *TopicSelectorStore
+	anonymous                    bool
+	debug                        bool
+	subscriptions                bool
+	ui                           bool
+	demo                         bool
+	logger                       Logger
+	writeTimeout                 time.Duration
+	dispatchTimeout              time.Duration
+	heartbeat                    time.Duration
+	publisherJWTKeyFunc          jwt.Keyfunc
+	subscriberJWTKeyFunc         jwt.Keyfunc
+	metrics                      Metrics
+	allowedHosts                 []string
+	publishOrigins               []string
+	corsOrigins                  []string
+	cookieName                   string
+	protocolVersionCompatibility int
+}
+
+func (o *opt) isBackwardCompatiblyEnabledWith(version int) bool {
+	return o.protocolVersionCompatibility != 0 && version >= o.protocolVersionCompatibility
 }
 
 // Hub stores channels with clients currently subscribed and allows to dispatch updates.
@@ -235,7 +294,11 @@ type Hub struct {
 
 // NewHub creates a new Hub instance.
 func NewHub(options ...Option) (*Hub, error) {
-	opt := &opt{writeTimeout: 600 * time.Second}
+	opt := &opt{
+		writeTimeout:    DefaultWriteTimeout,
+		dispatchTimeout: DefaultDispatchTimeout,
+		heartbeat:       DefaultHeartbeat,
+	}
 
 	for _, o := range options {
 		if err := o(opt); err != nil {
@@ -262,7 +325,7 @@ func NewHub(options ...Option) (*Hub, error) {
 	}
 
 	if opt.transport == nil {
-		t, _ := NewLocalTransport(nil, nil, nil)
+		t, _ := NewLocalTransport(nil, nil)
 		opt.transport = t
 	}
 

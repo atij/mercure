@@ -17,7 +17,7 @@ import (
 
 func createBoltTransport(dsn string) *BoltTransport {
 	u, _ := url.Parse(dsn)
-	transport, _ := NewBoltTransport(u, zap.NewNop(), nil)
+	transport, _ := NewBoltTransport(u, zap.NewNop())
 
 	return transport.(*BoltTransport)
 }
@@ -38,7 +38,7 @@ func TestBoltTransportHistory(t *testing.T) {
 	s := NewSubscriber("8", transport.logger)
 	s.SetTopics(topics, nil)
 
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
 	var count int
 	for {
@@ -50,6 +50,31 @@ func TestBoltTransportHistory(t *testing.T) {
 			return
 		}
 	}
+}
+
+func TestBoltTransportLogsBogusLastEventID(t *testing.T) {
+	sink, logger := newTestLogger(t)
+	defer sink.Reset()
+
+	u, _ := url.Parse("bolt://test.db")
+	transport, _ := NewBoltTransport(u, logger)
+	defer transport.Close()
+	defer os.Remove("test.db")
+
+	// make sure the db is not empty
+	topics := []string{"https://example.com/foo"}
+	transport.Dispatch(&Update{
+		Event:  Event{ID: "1"},
+		Topics: topics,
+	})
+
+	s := NewSubscriber("711131", logger)
+	s.SetTopics(topics, nil)
+
+	require.NoError(t, transport.AddSubscriber(s))
+
+	log := sink.String()
+	assert.Contains(t, log, `"LastEventID":"711131"`)
 }
 
 func TestBoltTopicSelectorHistory(t *testing.T) {
@@ -65,7 +90,7 @@ func TestBoltTopicSelectorHistory(t *testing.T) {
 	s := NewSubscriber(EarliestLastEventID, transport.logger)
 	s.SetTopics([]string{"http://example.com/subscribed", "http://example.com/subscribed-public-only"}, []string{"http://example.com/subscribed"})
 
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
 	assert.Equal(t, "1", (<-s.Receive()).ID)
 	assert.Equal(t, "4", (<-s.Receive()).ID)
@@ -86,7 +111,7 @@ func TestBoltTransportRetrieveAllHistory(t *testing.T) {
 
 	s := NewSubscriber(EarliestLastEventID, transport.logger)
 	s.SetTopics(topics, nil)
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
 	var count int
 	for {
@@ -116,7 +141,7 @@ func TestBoltTransportHistoryAndLive(t *testing.T) {
 
 	s := NewSubscriber("8", transport.logger)
 	s.SetTopics(topics, nil)
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -166,28 +191,28 @@ func TestBoltTransportPurgeHistory(t *testing.T) {
 
 func TestNewBoltTransport(t *testing.T) {
 	u, _ := url.Parse("bolt://test.db?bucket_name=demo")
-	transport, err := NewBoltTransport(u, zap.NewNop(), nil)
-	assert.Nil(t, err)
+	transport, err := NewBoltTransport(u, zap.NewNop())
+	require.NoError(t, err)
 	require.NotNil(t, transport)
 	transport.Close()
 
 	u, _ = url.Parse("bolt://")
-	_, err = NewBoltTransport(u, zap.NewNop(), nil)
-	assert.EqualError(t, err, `"bolt:": invalid transport: missing path`)
+	_, err = NewBoltTransport(u, zap.NewNop())
+	require.EqualError(t, err, `"bolt:": invalid transport: missing path`)
 
 	u, _ = url.Parse("bolt:///test.db")
-	_, err = NewBoltTransport(u, zap.NewNop(), nil)
+	_, err = NewBoltTransport(u, zap.NewNop())
 
 	// The exact error message depends of the OS
 	assert.Contains(t, err.Error(), "open /test.db:")
 
 	u, _ = url.Parse("bolt://test.db?cleanup_frequency=invalid")
-	_, err = NewBoltTransport(u, zap.NewNop(), nil)
-	assert.EqualError(t, err, `"bolt://test.db?cleanup_frequency=invalid": invalid "cleanup_frequency" parameter "invalid": invalid transport: strconv.ParseFloat: parsing "invalid": invalid syntax`)
+	_, err = NewBoltTransport(u, zap.NewNop())
+	require.EqualError(t, err, `"bolt://test.db?cleanup_frequency=invalid": invalid "cleanup_frequency" parameter "invalid": invalid transport: strconv.ParseFloat: parsing "invalid": invalid syntax`)
 
 	u, _ = url.Parse("bolt://test.db?size=invalid")
-	_, err = NewBoltTransport(u, zap.NewNop(), nil)
-	assert.EqualError(t, err, `"bolt://test.db?size=invalid": invalid "size" parameter "invalid": invalid transport: strconv.ParseUint: parsing "invalid": invalid syntax`)
+	_, err = NewBoltTransport(u, zap.NewNop())
+	require.EqualError(t, err, `"bolt://test.db?size=invalid": invalid "size" parameter "invalid": invalid transport: strconv.ParseUint: parsing "invalid": invalid syntax`)
 }
 
 func TestBoltTransportDoNotDispatchUntilListen(t *testing.T) {
@@ -197,7 +222,7 @@ func TestBoltTransportDoNotDispatchUntilListen(t *testing.T) {
 	assert.Implements(t, (*Transport)(nil), transport)
 
 	s := NewSubscriber("", transport.logger)
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -223,21 +248,21 @@ func TestBoltTransportDispatch(t *testing.T) {
 	s := NewSubscriber("", transport.logger)
 	s.SetTopics([]string{"https://example.com/foo", "https://example.com/private"}, []string{"https://example.com/private"})
 
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
 	notSubscribed := &Update{Topics: []string{"not-subscribed"}}
-	require.Nil(t, transport.Dispatch(notSubscribed))
+	require.NoError(t, transport.Dispatch(notSubscribed))
 
 	subscribedNotAuthorized := &Update{Topics: []string{"https://example.com/foo"}, Private: true}
-	require.Nil(t, transport.Dispatch(subscribedNotAuthorized))
+	require.NoError(t, transport.Dispatch(subscribedNotAuthorized))
 
-	public := &Update{Topics: s.Topics}
-	require.Nil(t, transport.Dispatch(public))
+	public := &Update{Topics: s.SubscribedTopics}
+	require.NoError(t, transport.Dispatch(public))
 
 	assert.Equal(t, public, <-s.Receive())
 
-	private := &Update{Topics: s.PrivateTopics, Private: true}
-	require.Nil(t, transport.Dispatch(private))
+	private := &Update{Topics: s.AllowedPrivateTopics, Private: true}
+	require.NoError(t, transport.Dispatch(private))
 
 	assert.Equal(t, private, <-s.Receive())
 }
@@ -251,12 +276,12 @@ func TestBoltTransportClosed(t *testing.T) {
 
 	s := NewSubscriber("", transport.logger)
 	s.SetTopics([]string{"https://example.com/foo"}, nil)
-	require.Nil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.AddSubscriber(s))
 
-	require.Nil(t, transport.Close())
-	require.NotNil(t, transport.AddSubscriber(s))
+	require.NoError(t, transport.Close())
+	require.Error(t, transport.AddSubscriber(s))
 
-	assert.Equal(t, transport.Dispatch(&Update{Topics: s.Topics}), ErrClosedTransport)
+	assert.Equal(t, transport.Dispatch(&Update{Topics: s.SubscribedTopics}), ErrClosedTransport)
 
 	_, ok := <-s.out
 	assert.False(t, ok)
@@ -270,11 +295,11 @@ func TestBoltCleanDisconnectedSubscribers(t *testing.T) {
 
 	s1 := NewSubscriber("", transport.logger)
 	s1.SetTopics([]string{"foo"}, []string{})
-	require.Nil(t, transport.AddSubscriber(s1))
+	require.NoError(t, transport.AddSubscriber(s1))
 
 	s2 := NewSubscriber("", transport.logger)
 	s2.SetTopics([]string{"foo"}, []string{})
-	require.Nil(t, transport.AddSubscriber(s2))
+	require.NoError(t, transport.AddSubscriber(s2))
 
 	assert.Equal(t, 2, transport.subscribers.Len())
 
@@ -294,30 +319,31 @@ func TestBoltGetSubscribers(t *testing.T) {
 	defer os.Remove("test.db")
 
 	s1 := NewSubscriber("", transport.logger)
-	require.Nil(t, transport.AddSubscriber(s1))
+	require.NoError(t, transport.AddSubscriber(s1))
 
 	s2 := NewSubscriber("", transport.logger)
-	require.Nil(t, transport.AddSubscriber(s2))
+	require.NoError(t, transport.AddSubscriber(s2))
 
 	lastEventID, subscribers, err := transport.GetSubscribers()
+	require.NoError(t, err)
+
 	assert.Equal(t, EarliestLastEventID, lastEventID)
 	assert.Len(t, subscribers, 2)
 	assert.Contains(t, subscribers, s1)
 	assert.Contains(t, subscribers, s2)
-	assert.Nil(t, err)
 }
 
 func TestBoltLastEventID(t *testing.T) {
 	db, err := bolt.Open("test.db", 0o600, nil)
 	defer os.Remove("test.db")
-	require.Nil(t, err)
+	require.NoError(t, err)
 
 	db.Update(func(tx *bolt.Tx) error {
 		bucket, err := tx.CreateBucketIfNotExists([]byte(defaultBoltBucketName))
-		require.Nil(t, err)
+		require.NoError(t, err)
 
 		seq, err := bucket.NextSequence()
-		require.Nil(t, err)
+		require.NoError(t, err)
 
 		prefix := make([]byte, 8)
 		binary.BigEndian.PutUint64(prefix, seq)
@@ -330,7 +356,7 @@ func TestBoltLastEventID(t *testing.T) {
 
 		return bucket.Put(key, []byte("invalid"))
 	})
-	require.Nil(t, db.Close())
+	require.NoError(t, db.Close())
 
 	transport := createBoltTransport("bolt://test.db")
 	require.NotNil(t, transport)

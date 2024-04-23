@@ -63,11 +63,11 @@ type Mercure struct {
 	// Maximum duration before closing the connection, defaults to 600s, set to 0 to disable.
 	WriteTimeout *caddy.Duration `json:"write_timeout,omitempty"`
 
-	// Maximum dispatch duration of an update.
-	DispatchTimeout caddy.Duration `json:"dispatch_timeout,omitempty"`
+	// Maximum dispatch duration of an update, defaults to 5s.
+	DispatchTimeout *caddy.Duration `json:"dispatch_timeout,omitempty"`
 
 	// Frequency of the heartbeat, defaults to 40s.
-	Heartbeat caddy.Duration `json:"heartbeat,omitempty"`
+	Heartbeat *caddy.Duration `json:"heartbeat,omitempty"`
 
 	// JWT key and signing algorithm to use for publishers.
 	PublisherJWT JWTConfig `json:"publisher_jwt,omitempty"`
@@ -89,6 +89,9 @@ type Mercure struct {
 
 	// The name of the authorization cookie. Defaults to "mercureAuthorization".
 	CookieName string `json:"cookie_name,omitempty"`
+
+	// The version of the Mercure protocol to be backward compatible with (only version 7 is supported)
+	ProtocolVersionCompatibility int `json:"protocol_version_compatibility,omitempty"`
 
 	hub    *mercure.Hub
 	logger *zap.Logger
@@ -137,13 +140,18 @@ func (m *Mercure) Provision(ctx caddy.Context) error { //nolint:funlen
 			return nil, fmt.Errorf("invalid transport url: %w", err)
 		}
 
-		if m.WriteTimeout != nil {
-			query := u.Query()
+		query := u.Query()
+		if m.WriteTimeout != nil && !query.Has("write_timeout") {
 			query.Set("write_timeout", time.Duration(*m.WriteTimeout).String())
-			u.RawQuery = query.Encode()
 		}
 
-		transport, err := mercure.NewTransport(u, m.logger, tss)
+		if m.Subscriptions && !query.Has("subscriptions") {
+			query.Set("subscriptions", "1")
+		}
+
+		u.RawQuery = query.Encode()
+
+		transport, err := mercure.NewTransport(u, m.logger)
 		if err != nil {
 			return nil, err //nolint:wrapcheck
 		}
@@ -193,17 +201,20 @@ func (m *Mercure) Provision(ctx caddy.Context) error { //nolint:funlen
 	if d := m.WriteTimeout; d != nil {
 		opts = append(opts, mercure.WithWriteTimeout(time.Duration(*d)))
 	}
-	if d := m.DispatchTimeout; d != 0 {
-		opts = append(opts, mercure.WithDispatchTimeout(time.Duration(d)))
+	if d := m.DispatchTimeout; d != nil {
+		opts = append(opts, mercure.WithDispatchTimeout(time.Duration(*d)))
 	}
-	if d := m.Heartbeat; d != 0 {
-		opts = append(opts, mercure.WithHeartbeat(time.Duration(d)))
+	if d := m.Heartbeat; d != nil {
+		opts = append(opts, mercure.WithHeartbeat(time.Duration(*d)))
 	}
 	if len(m.PublishOrigins) > 0 {
 		opts = append(opts, mercure.WithPublishOrigins(m.PublishOrigins))
 	}
 	if len(m.CORSOrigins) > 0 {
 		opts = append(opts, mercure.WithCORSOrigins(m.CORSOrigins))
+	}
+	if m.ProtocolVersionCompatibility != 0 {
+		opts = append(opts, mercure.WithProtocolVersionCompatibility(m.ProtocolVersionCompatibility))
 	}
 
 	h, err := mercure.NewHub(opts...)
@@ -233,7 +244,7 @@ func (m Mercure) ServeHTTP(w http.ResponseWriter, r *http.Request, next caddyhtt
 }
 
 // UnmarshalCaddyfile sets up the handler from Caddyfile tokens.
-func (m *Mercure) UnmarshalCaddyfile(d *caddyfile.Dispenser) error { //nolint:funlen nolint:gocognit
+func (m *Mercure) UnmarshalCaddyfile(d *caddyfile.Dispenser) error { //nolint:funlen,gocognit
 	for d.Next() {
 		for d.NextBlock(0) {
 			switch d.Val() {
@@ -272,7 +283,8 @@ func (m *Mercure) UnmarshalCaddyfile(d *caddyfile.Dispenser) error { //nolint:fu
 					return err //nolint:wrapcheck
 				}
 
-				m.DispatchTimeout = caddy.Duration(d)
+				cd := caddy.Duration(d)
+				m.DispatchTimeout = &cd
 
 			case "heartbeat":
 				if !d.NextArg() {
@@ -284,7 +296,8 @@ func (m *Mercure) UnmarshalCaddyfile(d *caddyfile.Dispenser) error { //nolint:fu
 					return err //nolint:wrapcheck
 				}
 
-				m.Heartbeat = caddy.Duration(d)
+				cd := caddy.Duration(d)
+				m.Heartbeat = &cd
 
 			case "publisher_jwt":
 				if !d.NextArg() {
@@ -347,6 +360,22 @@ func (m *Mercure) UnmarshalCaddyfile(d *caddyfile.Dispenser) error { //nolint:fu
 				}
 
 				m.CookieName = d.Val()
+
+			case "protocol_version_compatibility":
+				if !d.NextArg() {
+					return d.ArgErr()
+				}
+
+				v, err := strconv.Atoi(d.Val())
+				if err != nil {
+					return err //nolint:wrapcheck
+				}
+
+				if v != 7 {
+					return errors.New("compatibility mode only supports protocol version 7")
+				}
+
+				m.ProtocolVersionCompatibility = v
 			}
 		}
 	}

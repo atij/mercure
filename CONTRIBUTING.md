@@ -14,7 +14,7 @@ If you include code from another project, please mention it in the Pull Request 
 The commit message must follow the [Conventional Commits specification](https://www.conventionalcommits.org/).
 The following types are allowed:
 
-* `fix`: bug fix
+* `fix`: bugfix
 * `feat`: new feature
 * `docs`: change in the documentation
 * `spec`: spec change
@@ -48,7 +48,7 @@ To run the test suite:
 To test the Caddy module:
 
     cd caddy/mercure
-    MERCURE_PUBLISHER_JWT_KEY='!ChangeMe!' MERCURE_SUBSCRIBER_JWT_KEY='!ChangeMe!' go run main.go run -config ../../Caddyfile.dev
+    MERCURE_PUBLISHER_JWT_KEY='!ChangeThisMercureHubJWTSecretKey!' MERCURE_SUBSCRIBER_JWT_KEY='!ChangeThisMercureHubJWTSecretKey!' go run main.go run --config ../../Caddyfile.dev
 
 Go to `https://localhost` and enjoy!
 
@@ -67,29 +67,10 @@ When you send a PR, make sure that:
 * You make the PR on the same branch you based your changes on. If you see commits
   that you did not make in your PR, you're doing it wrong.
 
-### Configuring VSCode
+### Configuring Visual Studio Code
 
-`.vscode/launch.json`:
-
-```json
-{
-    "version": "0.2.0",
-    "configurations": [
-        {
-            "name": "Launch the hub",
-            "type": "go",
-            "request": "launch",
-            "mode": "auto",
-            "program": "${workspaceFolder}",
-            "env": {
-                "MERCURE_PUBLISHER_JWT_KEY": "!ChangeMe!",
-                "MERCURE_SUBSCRIBER_JWT_KEY": "!ChangeMe!"
-            },
-            "args": ["run", "-config", "Caddyfile.dev"]
-        }
-    ]
-}
-```
+A configuration for VSCode is provided in the `.vscode/` directory of the repository.
+It is automatically loaded by VS Code.
 
 ### Finding Deadlocks
 
@@ -110,7 +91,6 @@ To contribute to the protocol itself:
 * Make your changes
 * [Download Mmark](https://github.com/mmarkdown/mmark/releases)
 * [Download `xml2rfc` using pip](https://pypi.org/project/xml2rfc/): `pip install xml2rfc`
-* Format the Markdown file: `mmark -markdown -w spec/mercure.md`
 * Generate the XML file: `mmark spec/mercure.md > spec/mercure.xml`
 * Validate the generated XML file and generate the text file: `xml2rfc --text --v3 spec/mercure.xml`
 * Remove non-ASCII characters from the generated `mercure.txt` file (example: K**é**vin)

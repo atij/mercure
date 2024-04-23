@@ -29,7 +29,7 @@ func (h *Hub) initHandler() {
 
 	csp := "default-src 'self'"
 	if h.demo {
-		router.PathPrefix(defaultDemoURL).HandlerFunc(h.Demo).Methods("GET", "HEAD")
+		router.PathPrefix(defaultDemoURL).HandlerFunc(h.Demo).Methods(http.MethodGet, http.MethodHead)
 	}
 	if h.ui {
 		public, err := fs.Sub(uiContent, "public")
@@ -44,8 +44,8 @@ func (h *Hub) initHandler() {
 
 	h.registerSubscriptionHandlers(router)
 
-	router.HandleFunc(defaultHubURL, h.SubscribeHandler).Methods("GET", "HEAD")
-	router.HandleFunc(defaultHubURL, h.PublishHandler).Methods("POST")
+	router.HandleFunc(defaultHubURL, h.SubscribeHandler).Methods(http.MethodGet, http.MethodHead)
+	router.HandleFunc(defaultHubURL, h.PublishHandler).Methods(http.MethodPost)
 
 	secureMiddleware := secure.New(secure.Options{
 		IsDevelopment:         h.debug,
@@ -82,18 +82,22 @@ func (h *Hub) Serve() { //nolint:funlen
 	addr := h.config.GetString("addr")
 
 	h.server = &http.Server{
-		Addr:         addr,
-		Handler:      h.baseHandler(),
-		ReadTimeout:  h.config.GetDuration("read_timeout"),
-		WriteTimeout: h.config.GetDuration("write_timeout"),
+		Addr:              addr,
+		Handler:           h.baseHandler(),
+		ReadTimeout:       h.config.GetDuration("read_timeout"),
+		ReadHeaderTimeout: h.config.GetDuration("read_header_timeout"),
+		WriteTimeout:      h.config.GetDuration("write_timeout"),
 	}
 
 	if _, ok := h.metrics.(*PrometheusMetrics); ok {
 		addr := h.config.GetString("metrics_addr")
 
 		h.metricsServer = &http.Server{
-			Addr:    addr,
-			Handler: h.metricsHandler(),
+			Addr:              addr,
+			Handler:           h.metricsHandler(),
+			ReadTimeout:       h.config.GetDuration("read_timeout"),
+			ReadHeaderTimeout: h.config.GetDuration("read_header_timeout"),
+			WriteTimeout:      h.config.GetDuration("write_timeout"),
 		}
 
 		if c := h.logger.Check(zap.InfoLevel, "Mercure metrics started"); c != nil {
@@ -131,7 +135,7 @@ func (h *Hub) Serve() { //nolint:funlen
 			h.server.TLSConfig = certManager.TLSConfig()
 
 			// Mandatory for Let's Encrypt http-01 challenge
-			go http.ListenAndServe(h.config.GetString("acme_http01_addr"), certManager.HTTPHandler(nil))
+			go http.ListenAndServe(h.config.GetString("acme_http01_addr"), certManager.HTTPHandler(nil)) //nolint:gosec
 		}
 
 		if c := h.logger.Check(zap.InfoLevel, "Mercure started"); c != nil {
@@ -172,9 +176,11 @@ func (h *Hub) listenShutdown() <-chan struct{} {
 				c.Write(zap.Error(err))
 			}
 		}
-		if err := h.metricsServer.Shutdown(context.Background()); err != nil {
-			if c := h.logger.Check(zap.ErrorLevel, "Unexpected error during metrics server shutdown"); c != nil {
-				c.Write(zap.Error(err))
+		if h.metricsServer != nil {
+			if err := h.metricsServer.Shutdown(context.Background()); err != nil {
+				if c := h.logger.Check(zap.ErrorLevel, "Unexpected error during metrics server shutdown"); c != nil {
+					c.Write(zap.Error(err))
+				}
 			}
 		}
 		if c := h.logger.Check(zap.InfoLevel, "My Baby Shot Me Down"); c != nil {
@@ -196,12 +202,12 @@ func (h *Hub) chainHandlers() http.Handler { //nolint:funlen
 	r := mux.NewRouter()
 	h.registerSubscriptionHandlers(r)
 
-	r.HandleFunc(defaultHubURL, h.SubscribeHandler).Methods("GET", "HEAD")
-	r.HandleFunc(defaultHubURL, h.PublishHandler).Methods("POST")
+	r.HandleFunc(defaultHubURL, h.SubscribeHandler).Methods(http.MethodGet, http.MethodHead)
+	r.HandleFunc(defaultHubURL, h.PublishHandler).Methods(http.MethodPost)
 
 	csp := "default-src 'self'"
 	if h.demo {
-		r.PathPrefix("/demo").HandlerFunc(h.Demo).Methods("GET", "HEAD")
+		r.PathPrefix("/demo").HandlerFunc(h.Demo).Methods(http.MethodGet, http.MethodHead)
 	}
 
 	if h.ui {
@@ -213,7 +219,7 @@ func (h *Hub) chainHandlers() http.Handler { //nolint:funlen
 		r.PathPrefix("/").Handler(http.FileServer(http.FS(public)))
 		csp += " mercure.rocks cdn.jsdelivr.net"
 	} else {
-		r.HandleFunc("/", welcomeHandler).Methods("GET", "HEAD")
+		r.HandleFunc("/", welcomeHandler).Methods(http.MethodGet, http.MethodHead)
 	}
 
 	secureMiddleware := secure.New(secure.Options{
@@ -250,7 +256,13 @@ func (h *Hub) chainHandlers() http.Handler { //nolint:funlen
 	}
 
 	secureHandler := secureMiddleware.Handler(useForwardedHeadersHandlers)
-	loggingHandler := handlers.CombinedLoggingHandler(os.Stderr, secureHandler)
+
+	var loggingHandler http.Handler
+	if h.logger != nil && h.logger.Level().Enabled(zap.FatalLevel) {
+		loggingHandler = handlers.CombinedLoggingHandler(os.Stderr, secureHandler)
+	} else {
+		loggingHandler = secureHandler
+	}
 	recoveryHandler := handlers.RecoveryHandler(
 		handlers.RecoveryLogger(zapRecoveryHandlerLogger{h.logger}),
 		handlers.PrintRecoveryStack(h.debug),
@@ -274,9 +286,9 @@ func (h *Hub) registerSubscriptionHandlers(r *mux.Router) {
 	r.UseEncodedPath()
 	r.SkipClean(true)
 
-	r.HandleFunc(subscriptionURL, h.SubscriptionHandler).Methods("GET")
-	r.HandleFunc(subscriptionsForTopicURL, h.SubscriptionsHandler).Methods("GET")
-	r.HandleFunc(subscriptionsURL, h.SubscriptionsHandler).Methods("GET")
+	r.HandleFunc(subscriptionURL, h.SubscriptionHandler).Methods(http.MethodGet)
+	r.HandleFunc(subscriptionsForTopicURL, h.SubscriptionsHandler).Methods(http.MethodGet)
+	r.HandleFunc(subscriptionsURL, h.SubscriptionsHandler).Methods(http.MethodGet)
 }
 
 // Deprecated: use the Caddy server module or the standalone library instead.
@@ -306,13 +318,13 @@ func (h *Hub) metricsHandler() http.Handler {
 
 // Deprecated: use the Caddy server module or the standalone library instead.
 func registerHealthz(router *mux.Router) {
-	router.HandleFunc("/healthz", func(w http.ResponseWriter, r *http.Request) {
+	router.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		fmt.Fprint(w, "ok")
-	}).Methods("GET", "HEAD")
+	}).Methods(http.MethodGet, http.MethodHead)
 }
 
 // Deprecated: use the Caddy server module or the standalone library instead.
-func welcomeHandler(w http.ResponseWriter, r *http.Request) {
+func welcomeHandler(w http.ResponseWriter, _ *http.Request) {
 	fmt.Fprint(w, `<!DOCTYPE html>
 <title>Mercure Hub</title>
 <h1>Welcome to <a href="https://mercure.rocks">Mercure</a>!</h1>`)

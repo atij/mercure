@@ -39,7 +39,7 @@ type BoltTransport struct {
 }
 
 // NewBoltTransport create a new boltTransport.
-func NewBoltTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport, error) { //nolint:ireturn
+func NewBoltTransport(u *url.URL, l Logger) (Transport, error) { //nolint:ireturn
 	var err error
 	q := u.Query()
 	bucketName := defaultBoltBucketName
@@ -213,16 +213,10 @@ func (t *BoltTransport) GetSubscribers() (string, []*Subscriber, error) {
 	t.RLock()
 	defer t.RUnlock()
 
-	var subscribers []*Subscriber
-	t.subscribers.Walk(0, func(s *Subscriber) bool {
-		subscribers = append(subscribers, s)
-
-		return true
-	})
-
-	return t.lastEventID, subscribers, nil
+	return t.lastEventID, getSubscribers(t.subscribers), nil
 }
 
+//nolint:gocognit
 func (t *BoltTransport) dispatchHistory(s *Subscriber, toSeq uint64) {
 	t.db.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte(t.bucketName))
@@ -262,6 +256,11 @@ func (t *BoltTransport) dispatchHistory(s *Subscriber, toSeq uint64) {
 			}
 		}
 		s.HistoryDispatched(responseLastEventID)
+		if !afterFromID {
+			if c := t.logger.Check(zap.InfoLevel, "Can't find requested LastEventID"); c != nil {
+				c.Write(zap.String("LastEventID", s.RequestLastEventID))
+			}
+		}
 
 		return nil
 	})

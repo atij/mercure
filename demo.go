@@ -9,7 +9,10 @@ import (
 	"time"
 )
 
+const linkSuffix = `>; rel="mercure"`
+
 // uiContent is our static web server content.
+//
 //go:embed public
 var uiContent embed.FS
 
@@ -28,7 +31,7 @@ func (h *Hub) Demo(w http.ResponseWriter, r *http.Request) {
 	body := query.Get("body")
 	jwt := query.Get("jwt")
 
-	hubLink := "<" + defaultHubURL + ">; rel=\"mercure\""
+	hubLink := "<" + defaultHubURL + linkSuffix
 	if h.cookieName != defaultCookieName {
 		hubLink = hubLink + "; cookie-name=\"" + h.cookieName + "\""
 	}

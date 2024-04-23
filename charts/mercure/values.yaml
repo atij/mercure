@@ -4,12 +4,16 @@
 
 # -- Inject global options in the Caddyfile.
 globalOptions: ""
+# -- Inject snippet or named-routes options in the Caddyfile
+caddyExtraConfig: ""
 # -- Enable the development mode, including the debug UI and the demo.
 dev: false
 # -- The URL representation of the transport to use.
 transportUrl: bolt:///data/mercure.db
 # -- Inject extra Mercure directives in the Caddyfile.
 extraDirectives: ""
+# -- Inject extra Caddy directives in the Caddyfile.
+caddyExtraDirectives: ""
 
 # -- The JWT key to use for publishers, a random key will be generated if empty.
 publisherJwtKey: ""
@@ -74,6 +78,8 @@ service:
   type: ClusterIP
   # -- Service port.
   port: 80
+  # -- Service target port.
+  targetPort: 80
   annotations: {}
 
 ingress:
@@ -133,6 +139,16 @@ tolerations: []
 # -- [Affinity](https://kubernetes.io/docs/concepts/scheduling-eviction/assign-pod-node/#affinity-and-anti-affinity) configuration.
 # See the [API reference](https://kubernetes.io/docs/reference/kubernetes-api/workload-resources/pod-v1/#scheduling) for details.
 affinity: {}
+
+# -- [Topology spread constraints](https://kubernetes.io/docs/concepts/scheduling-eviction/topology-spread-constraints/) configuration.
+# This is a template
+#  topologySpreadConstraints: |
+#  - maxSkew: 1
+#    topologyKey: kubernetes.io/hostname
+#    whenUnsatisfiable: DoNotSchedule
+#    labelSelector:
+#      matchLabels:
+#        {{- include "mercure.selectorLabels" . | nindent 8 }}
 
 # -- Enable persistence using [Persistent Volume Claims](http://kubernetes.io/docs/user-guide/persistent-volumes/), only useful if you the BoltDB transport.
 persistence:

@@ -11,7 +11,7 @@ import (
 const EarliestLastEventID = "earliest"
 
 // TransportFactory is the factory to initialize a new transport.
-type TransportFactory = func(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport, error)
+type TransportFactory = func(u *url.URL, l Logger) (Transport, error)
 
 var (
 	transportFactories   = make(map[string]TransportFactory) //nolint:gochecknoglobals
@@ -24,7 +24,7 @@ func RegisterTransportFactory(scheme string, factory TransportFactory) {
 	transportFactoriesMu.Unlock()
 }
 
-func NewTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport, error) { //nolint:ireturn
+func NewTransport(u *url.URL, l Logger) (Transport, error) { //nolint:ireturn
 	transportFactoriesMu.RLock()
 	f, ok := transportFactories[u.Scheme]
 	transportFactoriesMu.RUnlock()
@@ -33,7 +33,7 @@ func NewTransport(u *url.URL, l Logger, tss *TopicSelectorStore) (Transport, err
 		return nil, &TransportError{dsn: u.Redacted(), msg: "no such transport available"}
 	}
 
-	return f(u, l, nil)
+	return f(u, l)
 }
 
 // Transport provides methods to dispatch and persist updates.
@@ -44,7 +44,7 @@ type Transport interface {
 	// AddSubscriber adds a new subscriber to the transport.
 	AddSubscriber(s *Subscriber) error
 
-	// RemoveSubscriber removes a new subscriber from the transport.
+	// RemoveSubscriber removes a subscriber from the transport.
 	RemoveSubscriber(s *Subscriber) error
 
 	// Close closes the Transport.
@@ -85,4 +85,14 @@ func (e *TransportError) Error() string {
 
 func (e *TransportError) Unwrap() error {
 	return e.err
+}
+
+func getSubscribers(sl *SubscriberList) (subscribers []*Subscriber) {
+	sl.Walk(0, func(s *Subscriber) bool {
+		subscribers = append(subscribers, s)
+
+		return true
+	})
+
+	return
 }

@@ -1,6 +1,7 @@
 package mercure
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/kevburnsjr/skipfilter"
@@ -10,50 +11,106 @@ type SubscriberList struct {
 	skipfilter *skipfilter.SkipFilter
 }
 
+// We choose a delimiter and an escape character which are unlikely to be used.
+const (
+	escape = '\x00'
+	delim  = '\x01'
+)
+
+//nolint:gochecknoglobals
+var replacer = strings.NewReplacer(
+	string(escape), string([]rune{escape, escape}),
+	string(delim), string([]rune{escape, delim}),
+)
+
 func NewSubscriberList(size int) *SubscriberList {
 	return &SubscriberList{
-		skipfilter: skipfilter.New(func(s interface{}, topic interface{}) bool {
-			p := strings.SplitN(topic.(string), "_", 2)
-			if len(p) < 2 {
-				return false
-			}
-
-			return s.(*Subscriber).MatchTopic(p[1], p[0] == "p")
+		skipfilter: skipfilter.New(func(s interface{}, filter interface{}) bool {
+			return s.(*Subscriber).MatchTopics(decode(filter.(string)))
 		}, size),
 	}
 }
 
-func (sc *SubscriberList) MatchAny(u *Update) (res []*Subscriber) {
-	scopedTopics := make([]interface{}, len(u.Topics))
-	for i, t := range u.Topics {
-		if u.Private {
-			scopedTopics[i] = "p_" + t
-		} else {
-			scopedTopics[i] = "_" + t
+func encode(topics []string, private bool) string {
+	sort.Strings(topics)
+
+	parts := make([]string, len(topics)+1)
+	if private {
+		parts[0] = "1"
+	} else {
+		parts[0] = "0"
+	}
+
+	for i, t := range topics {
+		parts[i+1] = replacer.Replace(t)
+	}
+
+	return strings.Join(parts, string(delim))
+}
+
+func decode(f string) (topics []string, private bool) {
+	var (
+		privateExtracted, inEscape bool
+		builder                    strings.Builder
+	)
+
+	for _, char := range f {
+		if inEscape {
+			builder.WriteRune(char)
+			inEscape = false
+
+			continue
+		}
+
+		switch char {
+		case escape:
+			inEscape = true
+
+		case delim:
+			if !privateExtracted {
+				private = builder.String() == "1"
+				builder.Reset()
+
+				privateExtracted = true
+
+				break
+			}
+
+			topics = append(topics, builder.String())
+			builder.Reset()
+
+		default:
+			builder.WriteRune(char)
 		}
 	}
 
-	for _, m := range sc.skipfilter.MatchAny(scopedTopics...) {
+	topics = append(topics, builder.String())
+
+	return topics, private
+}
+
+func (sl *SubscriberList) MatchAny(u *Update) (res []*Subscriber) {
+	for _, m := range sl.skipfilter.MatchAny(encode(u.Topics, u.Private)) {
 		res = append(res, m.(*Subscriber))
 	}
 
 	return
 }
 
-func (sc *SubscriberList) Walk(start uint64, callback func(s *Subscriber) bool) uint64 {
-	return sc.skipfilter.Walk(start, func(val interface{}) bool {
+func (sl *SubscriberList) Walk(start uint64, callback func(s *Subscriber) bool) uint64 {
+	return sl.skipfilter.Walk(start, func(val interface{}) bool {
 		return callback(val.(*Subscriber))
 	})
 }
 
-func (sc *SubscriberList) Add(s *Subscriber) {
-	sc.skipfilter.Add(s)
+func (sl *SubscriberList) Add(s *Subscriber) {
+	sl.skipfilter.Add(s)
 }
 
-func (sc *SubscriberList) Remove(s *Subscriber) {
-	sc.skipfilter.Remove(s)
+func (sl *SubscriberList) Remove(s *Subscriber) {
+	sl.skipfilter.Remove(s)
 }
 
-func (sc *SubscriberList) Len() int {
-	return sc.skipfilter.Len()
+func (sl *SubscriberList) Len() int {
+	return sl.skipfilter.Len()
 }

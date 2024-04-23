@@ -5,7 +5,6 @@ import (
 	"crypto/tls"
 	"errors"
 	"io"
-	"io/ioutil"
 	"net/http"
 	"net/url"
 	"os"
@@ -23,8 +22,11 @@ import (
 )
 
 const (
-	testURL       = "http://" + testAddr + defaultHubURL
-	testSecureURL = "https://" + testAddr + defaultHubURL
+	testURLscheme = "http://"
+	testURL       = testURLscheme + testAddr + defaultHubURL
+
+	testSecureURLScheme = "https://"
+	testSecureURL       = testSecureURLScheme + testAddr + defaultHubURL
 )
 
 func TestForwardedHeaders(t *testing.T) {
@@ -44,16 +46,16 @@ func TestForwardedHeaders(t *testing.T) {
 	defer resp.Body.Close()
 
 	body := url.Values{"topic": {"http://example.com/test-forwarded"}, "data": {"hello"}}
-	req, _ := http.NewRequest("POST", testURL, strings.NewReader(body.Encode()))
+	req, _ := http.NewRequest(http.MethodPost, testURL, strings.NewReader(body.Encode()))
 	req.Header.Add("X-Forwarded-For", "192.0.2.1")
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Add("Authorization", "Bearer "+createDummyAuthorizedJWT(h, rolePublisher, []string{}))
+	req.Header.Add("Authorization", bearerPrefix+createDummyAuthorizedJWT(rolePublisher, []string{"*"}))
 
 	resp2, err := client.Do(req)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	defer resp2.Body.Close()
 
-	assert.True(t, logs.FilterField(zap.String("remote_addr", "192.0.2.1")).Len() == 1)
+	assert.Equal(t, 1, logs.FilterField(zap.String("remote_addr", "192.0.2.1")).Len())
 
 	h.server.Shutdown(context.Background())
 }
@@ -85,10 +87,10 @@ func TestSecurityOptions(t *testing.T) {
 	resp.Body.Close()
 
 	// Preflight request
-	req, _ := http.NewRequest("OPTIONS", testSecureURL, nil)
+	req, _ := http.NewRequest(http.MethodOptions, testSecureURL, nil)
 	req.Header.Add("Origin", "https://example.com")
 	req.Header.Add("Access-Control-Request-Headers", "authorization,cache-control,last-event-id")
-	req.Header.Add("Access-Control-Request-Method", "GET")
+	req.Header.Add("Access-Control-Request-Method", http.MethodGet)
 	resp2, _ := client.Do(req)
 	require.NotNil(t, resp2)
 
@@ -98,7 +100,7 @@ func TestSecurityOptions(t *testing.T) {
 	resp2.Body.Close()
 
 	// Subscriptions
-	req, _ = http.NewRequest("GET", testSecureURL+"/subscriptions", nil)
+	req, _ = http.NewRequest(http.MethodGet, testSecureURL+subscriptionsPath, nil)
 	resp3, _ := client.Do(req)
 	require.NotNil(t, resp3)
 	assert.Equal(t, http.StatusUnauthorized, resp3.StatusCode)
@@ -133,16 +135,16 @@ func TestSecurityOptionsWithCorsOrigin(t *testing.T) {
 	assert.Equal(t, "1; mode=block", resp.Header.Get("X-Xss-Protection"))
 	resp.Body.Close()
 
-	req, _ := http.NewRequest("OPTIONS", testSecureURL, nil)
+	req, _ := http.NewRequest(http.MethodOptions, testSecureURL, nil)
 
-	req.Header.Add("Authorization", "Bearer "+createDummyAuthorizedJWT(h, roleSubscriber, []string{}))
+	req.Header.Add("Authorization", bearerPrefix+createDummyAuthorizedJWT(roleSubscriber, []string{}))
 	req.Header.Add("Content-Type", "text/plain; boundary=")
 	req.Header.Add("Origin", "https://subscriber.com")
 	req.Header.Add("Host", "subscriber.com")
 	req.Header.Add("Cache-Control", "no-cache")
 	req.Header.Add("Pragma", "no-cache")
 	req.Header.Add("Access-Control-Request-Headers", "authorization,cache-control,last-event-id")
-	req.Header.Add("Access-Control-Request-Method", "GET")
+	req.Header.Add("Access-Control-Request-Method", http.MethodGet)
 	resp2, _ := client.Do(req)
 	require.NotNil(t, resp2)
 
@@ -163,17 +165,17 @@ func TestServe(t *testing.T) {
 	var resp *http.Response
 	client := http.Client{Timeout: 100 * time.Millisecond}
 	for resp == nil {
-		resp, _ = client.Get("http://" + testAddr + "/") //nolint:bodyclose
+		resp, _ = client.Get(testURLscheme + testAddr + "/") //nolint:bodyclose
 	}
 	defer resp.Body.Close()
 
-	hpBody, _ := ioutil.ReadAll(resp.Body)
+	hpBody, _ := io.ReadAll(resp.Body)
 	assert.Contains(t, string(hpBody), "Mercure Hub")
 
-	respHealthz, err := client.Get("http://" + testAddr + "/healthz")
-	require.Nil(t, err)
+	respHealthz, err := client.Get(testURLscheme + testAddr + "/healthz")
+	require.NoError(t, err)
 	defer respHealthz.Body.Close()
-	healthzBody, _ := ioutil.ReadAll(respHealthz.Body)
+	healthzBody, _ := io.ReadAll(respHealthz.Body)
 	assert.Contains(t, string(healthzBody), "ok")
 
 	var wgConnected, wgTested sync.WaitGroup
@@ -183,11 +185,11 @@ func TestServe(t *testing.T) {
 	go func() {
 		defer wgTested.Done()
 		resp, err := client.Get(testURL + "?topic=http%3A%2F%2Fexample.com%2Ffoo%2F1")
-		require.Nil(t, err)
+		assert.NoError(t, err)
 		wgConnected.Done()
 
 		defer resp.Body.Close()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 
 		assert.Equal(t, []byte(":\nid: first\ndata: hello\n\n"), body)
 	}()
@@ -195,11 +197,11 @@ func TestServe(t *testing.T) {
 	go func() {
 		defer wgTested.Done()
 		resp, err := client.Get(testURL + "?topic=http%3A%2F%2Fexample.com%2Falt%2F1")
-		require.Nil(t, err)
+		assert.NoError(t, err)
 		wgConnected.Done()
 
 		defer resp.Body.Close()
-		body, _ := ioutil.ReadAll(resp.Body)
+		body, _ := io.ReadAll(resp.Body)
 
 		assert.Equal(t, []byte(":\nid: first\ndata: hello\n\n"), body)
 	}()
@@ -207,12 +209,12 @@ func TestServe(t *testing.T) {
 	wgConnected.Wait()
 
 	body := url.Values{"topic": {"http://example.com/foo/1", "http://example.com/alt/1"}, "data": {"hello"}, "id": {"first"}}
-	req, _ := http.NewRequest("POST", testURL, strings.NewReader(body.Encode()))
+	req, _ := http.NewRequest(http.MethodPost, testURL, strings.NewReader(body.Encode()))
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Add("Authorization", "Bearer "+createDummyAuthorizedJWT(h, rolePublisher, []string{}))
+	req.Header.Add("Authorization", bearerPrefix+createDummyAuthorizedJWT(rolePublisher, []string{"*"}))
 
 	resp2, err := client.Do(req)
-	require.Nil(t, err)
+	require.NoError(t, err)
 	defer resp2.Body.Close()
 
 	h.server.Shutdown(context.Background())
@@ -221,29 +223,33 @@ func TestServe(t *testing.T) {
 
 func TestClientClosesThenReconnects(t *testing.T) {
 	l := zap.NewNop()
-	u, _ := url.Parse("bolt://test.db")
-	bt, _ := NewTransport(u, l, nil)
+	u, err := url.Parse("bolt://test.db")
+	require.NoError(t, err)
+
+	bt, err := NewTransport(u, l)
+	require.NoError(t, err)
+	defer os.Remove("test.db")
+
 	h := createAnonymousDummy(WithLogger(l), WithTransport(bt))
 	transport := h.transport.(*BoltTransport)
-	defer os.Remove("test.db")
 	go h.Serve()
 
 	// loop until the web server is ready
 	var resp *http.Response
 	client := http.Client{Timeout: 10 * time.Second}
 	for resp == nil {
-		resp, _ = client.Get("http://" + testAddr + "/") //nolint:bodyclose
+		resp, _ = client.Get(testURLscheme + testAddr) //nolint:bodyclose
 	}
-	resp.Body.Close()
+	require.NoError(t, resp.Body.Close())
 
 	var wg sync.WaitGroup
 
 	subscribe := func(expectedBodyData string) {
 		cx, cancel := context.WithCancel(context.Background())
-		req, _ := http.NewRequest("GET", testURL+"?topic=http%3A%2F%2Fexample.com%2Ffoo%2F1", nil)
+		req, _ := http.NewRequest(http.MethodGet, testURL+"?topic=http%3A%2F%2Fexample.com%2Ffoo%2F1", nil)
 		req = req.WithContext(cx)
 		resp, err := http.DefaultClient.Do(req)
-		require.Nil(t, err)
+		require.NoError(t, err)
 
 		var receivedBody strings.Builder
 		buf := make([]byte, 1024)
@@ -261,30 +267,30 @@ func TestClientClosesThenReconnects(t *testing.T) {
 			}
 		}
 
-		resp.Body.Close()
+		require.NoError(t, resp.Body.Close())
 		wg.Done()
 	}
 
 	publish := func(data string, waitForSubscribers int) {
 		for {
-			transport.Lock()
+			transport.RLock()
 			l := transport.subscribers.Len()
-			transport.Unlock()
+			transport.RUnlock()
 			if l >= waitForSubscribers {
 				break
 			}
 		}
 
 		body := url.Values{"topic": {"http://example.com/foo/1"}, "data": {data}, "id": {data}}
-		req, err := http.NewRequest("POST", testURL, strings.NewReader(body.Encode()))
-		require.Nil(t, err)
+		req, err := http.NewRequest(http.MethodPost, testURL, strings.NewReader(body.Encode()))
+		require.NoError(t, err)
 		req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-		req.Header.Add("Authorization", "Bearer "+createDummyAuthorizedJWT(h, rolePublisher, []string{}))
+		req.Header.Add("Authorization", bearerPrefix+createDummyAuthorizedJWT(rolePublisher, []string{"*"}))
 
 		resp, err := client.Do(req)
-		require.Nil(t, err)
+		require.NoError(t, err)
 		require.Equal(t, http.StatusOK, resp.StatusCode)
-		resp.Body.Close()
+		require.NoError(t, resp.Body.Close())
 
 		wg.Done()
 	}
@@ -319,7 +325,7 @@ func TestClientClosesThenReconnects(t *testing.T) {
 }
 
 func TestServeAcme(t *testing.T) {
-	dir, _ := ioutil.TempDir("", "cert")
+	dir, _ := os.MkdirTemp("", "cert")
 	defer os.RemoveAll(dir)
 
 	h := createAnonymousDummy(WithAllowedHosts([]string{"example.com"}))
@@ -329,7 +335,7 @@ func TestServeAcme(t *testing.T) {
 
 	go h.Serve()
 	client := &http.Client{
-		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
@@ -344,7 +350,7 @@ func TestServeAcme(t *testing.T) {
 	resp.Body.Close()
 
 	resp, err := client.Get("http://0.0.0.0:8080/.well-known/acme-challenge/does-not-exists")
-	assert.Nil(t, err)
+	require.NoError(t, err)
 	require.NotNil(t, resp)
 	defer resp.Body.Close()
 
@@ -356,12 +362,12 @@ func TestMetricsAccess(t *testing.T) {
 	server := newTestServer(t)
 	defer server.shutdown()
 
-	resp, err := server.client.Get("http://" + testMetricsAddr + "/metrics")
-	require.Nil(t, err)
+	resp, err := server.client.Get(testURLscheme + testMetricsAddr + metricsPath)
+	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	resp, err = server.client.Get("http://" + testMetricsAddr + "/healthz")
-	require.Nil(t, err)
+	resp, err = server.client.Get(testURLscheme + testMetricsAddr + "/healthz")
+	require.NoError(t, err)
 	defer resp.Body.Close()
 
 	assert.Equal(t, 200, resp.StatusCode)
@@ -383,7 +389,7 @@ func TestMetricsCollect(t *testing.T) {
 	body = url.Values{"topic": {"http://example.com/foo/1"}, "data": {"second hello"}, "id": {"second"}}
 	server.publish(body)
 
-	server.assertMetric("mercure_subscribers 3")
+	server.assertMetric("mercure_subscribers_connected 3")
 	server.assertMetric("mercure_subscribers_total 4")
 	server.assertMetric("mercure_updates_total 2")
 }
@@ -392,12 +398,12 @@ func TestMetricsVersionIsAccessible(t *testing.T) {
 	server := newTestServer(t)
 	defer server.shutdown()
 
-	resp, err := server.client.Get("http://" + testMetricsAddr + "/metrics")
-	assert.Nil(t, err)
+	resp, err := server.client.Get(testURLscheme + testMetricsAddr + metricsPath)
+	require.NoError(t, err)
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
-	assert.Nil(t, err)
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
 
 	pattern := "mercure_version_info{architecture=\".+\",built_at=\".*\",commit=\".*\",go_version=\".+\",os=\".+\",version=\"dev\"} 1"
 	assert.Regexp(t, regexp.MustCompile(pattern), string(b))
@@ -425,7 +431,7 @@ func newTestServer(t *testing.T) testServer {
 	var resp *http.Response
 	client := http.Client{Timeout: 100 * time.Millisecond}
 	for resp == nil {
-		resp, _ = client.Get("http://" + testAddr + "/") //nolint:bodyclose
+		resp, _ = client.Get(testURLscheme + testAddr + "/") //nolint:bodyclose
 	}
 	defer resp.Body.Close()
 
@@ -456,7 +462,7 @@ func (s *testServer) newSubscriber(topic string, keepAlive bool) {
 	go func() {
 		defer s.wgTested.Done()
 		resp, err := s.client.Get(testURL + "?topic=" + url.QueryEscape(topic))
-		require.Nil(s.t, err)
+		require.NoError(s.t, err)
 		defer resp.Body.Close()
 		s.wgConnected.Done()
 
@@ -467,12 +473,12 @@ func (s *testServer) newSubscriber(topic string, keepAlive bool) {
 }
 
 func (s *testServer) publish(body url.Values) {
-	req, _ := http.NewRequest("POST", testURL, strings.NewReader(body.Encode()))
+	req, _ := http.NewRequest(http.MethodPost, testURL, strings.NewReader(body.Encode()))
 	req.Header.Add("Content-Type", "application/x-www-form-urlencoded")
-	req.Header.Add("Authorization", "Bearer "+createDummyAuthorizedJWT(s.h, rolePublisher, []string{}))
+	req.Header.Add("Authorization", bearerPrefix+createDummyAuthorizedJWT(rolePublisher, []string{"*"}))
 
 	resp, err := s.client.Do(req)
-	require.Nil(s.t, err)
+	require.NoError(s.t, err)
 	defer resp.Body.Close()
 }
 
@@ -481,12 +487,12 @@ func (s *testServer) waitSubscribers() {
 }
 
 func (s *testServer) assertMetric(metric string) {
-	resp, err := s.client.Get("http://" + testMetricsAddr + "/metrics")
-	assert.Nil(s.t, err)
+	resp, err := s.client.Get(testURLscheme + testMetricsAddr + metricsPath)
+	require.NoError(s.t, err)
 	defer resp.Body.Close()
 
-	b, err := ioutil.ReadAll(resp.Body)
-	assert.Nil(s.t, err)
+	b, err := io.ReadAll(resp.Body)
+	require.NoError(s.t, err)
 
 	assert.Contains(s.t, string(b), metric)
 }

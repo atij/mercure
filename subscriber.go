@@ -15,17 +15,17 @@ import (
 
 // Subscriber represents a client subscribed to a list of topics.
 type Subscriber struct {
-	ID                 string
-	EscapedID          string
-	Claims             *claims
-	EscapedTopics      []string
-	RequestLastEventID string
-	RemoteAddr         string
-	Topics             []string
-	TopicRegexps       []*regexp.Regexp
-	PrivateTopics      []string
-	PrivateRegexps     []*regexp.Regexp
-	Debug              bool
+	ID                     string
+	EscapedID              string
+	Claims                 *claims
+	EscapedTopics          []string
+	RequestLastEventID     string
+	RemoteAddr             string
+	SubscribedTopics       []string
+	SubscribedTopicRegexps []*regexp.Regexp
+	AllowedPrivateTopics   []string
+	AllowedPrivateRegexps  []*regexp.Regexp
+	Debug                  bool
 
 	disconnected        int32
 	out                 chan *Update
@@ -37,6 +37,8 @@ type Subscriber struct {
 	liveMutex           sync.RWMutex
 }
 
+const outBufferLength = 1000
+
 // NewSubscriber creates a new subscriber.
 func NewSubscriber(lastEventID string, logger Logger) *Subscriber {
 	id := "urn:uuid:" + uuid.Must(uuid.NewV4()).String()
@@ -45,7 +47,7 @@ func NewSubscriber(lastEventID string, logger Logger) *Subscriber {
 		EscapedID:           url.QueryEscape(id),
 		RequestLastEventID:  lastEventID,
 		responseLastEventID: make(chan string, 1),
-		out:                 make(chan *Update, 1000),
+		out:                 make(chan *Update, outBufferLength),
 		logger:              logger,
 	}
 
@@ -72,15 +74,17 @@ func (s *Subscriber) Dispatch(u *Update, fromHistory bool) bool {
 	}
 
 	s.outMutex.Lock()
-	defer s.outMutex.Unlock()
 	if atomic.LoadInt32(&s.disconnected) > 0 {
+		s.outMutex.Unlock()
+
 		return false
 	}
 
 	select {
 	case s.out <- u:
+		s.outMutex.Unlock()
 	default:
-		s.logger.Error("error when dispatching the update", zap.Any("update", u), zap.Any("subscriber", s))
+		s.handleFullChan()
 
 		return false
 	}
@@ -89,17 +93,25 @@ func (s *Subscriber) Dispatch(u *Update, fromHistory bool) bool {
 }
 
 // Ready flips the ready flag to true and flushes queued live updates returning number of events flushed.
-func (s *Subscriber) Ready() int {
+func (s *Subscriber) Ready() (n int) {
 	s.liveMutex.Lock()
-	defer s.liveMutex.Unlock()
 	s.outMutex.Lock()
-	defer s.outMutex.Unlock()
 
-	n := len(s.liveQueue)
 	for _, u := range s.liveQueue {
-		s.out <- u
+		select {
+		case s.out <- u:
+			n++
+		default:
+			s.handleFullChan()
+			s.liveMutex.Unlock()
+
+			return n
+		}
 	}
 	atomic.StoreInt32(&s.ready, 1)
+
+	s.outMutex.Unlock()
+	s.liveMutex.Unlock()
 
 	return n
 }
@@ -128,26 +140,26 @@ func (s *Subscriber) Disconnect() {
 }
 
 // SetTopics compiles topic selector regexps.
-func (s *Subscriber) SetTopics(topics, privateTopics []string) {
-	s.Topics = topics
-	s.TopicRegexps = make([]*regexp.Regexp, len(topics))
-	for i, ts := range topics {
+func (s *Subscriber) SetTopics(subscribedTopics, allowedPrivateTopics []string) {
+	s.SubscribedTopics = subscribedTopics
+	s.SubscribedTopicRegexps = make([]*regexp.Regexp, len(subscribedTopics))
+	for i, ts := range subscribedTopics {
 		var r *regexp.Regexp
 		if tpl, err := uritemplate.New(ts); err == nil {
 			r = tpl.Regexp()
 		}
-		s.TopicRegexps[i] = r
+		s.SubscribedTopicRegexps[i] = r
 	}
-	s.PrivateTopics = privateTopics
-	s.PrivateRegexps = make([]*regexp.Regexp, len(privateTopics))
-	for i, ts := range privateTopics {
+	s.AllowedPrivateTopics = allowedPrivateTopics
+	s.AllowedPrivateRegexps = make([]*regexp.Regexp, len(allowedPrivateTopics))
+	for i, ts := range allowedPrivateTopics {
 		var r *regexp.Regexp
 		if tpl, err := uritemplate.New(ts); err == nil {
 			r = tpl.Regexp()
 		}
-		s.PrivateRegexps[i] = r
+		s.AllowedPrivateRegexps[i] = r
 	}
-	s.EscapedTopics = escapeTopics(topics)
+	s.EscapedTopics = escapeTopics(subscribedTopics)
 }
 
 func escapeTopics(topics []string) []string {
@@ -160,36 +172,48 @@ func escapeTopics(topics []string) []string {
 }
 
 // MatchTopic checks if the current subscriber can access to the given topic.
-func (s *Subscriber) MatchTopic(topic string, private bool) (match bool) {
-	for i, ts := range s.Topics {
-		if ts == "*" || ts == topic {
-			match = true
+//
+//nolint:gocognit
+func (s *Subscriber) MatchTopics(topics []string, private bool) bool {
+	var subscribed bool
+	canAccess := !private
 
-			break
+	for _, topic := range topics {
+		if !subscribed {
+			for i, ts := range s.SubscribedTopics {
+				if ts == "*" || ts == topic {
+					subscribed = true
+
+					break
+				}
+
+				r := s.SubscribedTopicRegexps[i]
+				if r != nil && r.MatchString(topic) {
+					subscribed = true
+
+					break
+				}
+			}
 		}
 
-		r := s.TopicRegexps[i]
-		if r != nil && r.MatchString(topic) {
-			match = true
+		if !canAccess {
+			for i, ts := range s.AllowedPrivateTopics {
+				if ts == "*" || ts == topic {
+					canAccess = true
 
-			break
-		}
-	}
+					break
+				}
 
-	if !match {
-		return false
-	}
-	if !private {
-		return true
-	}
+				r := s.AllowedPrivateRegexps[i]
+				if r != nil && r.MatchString(topic) {
+					canAccess = true
 
-	for i, ts := range s.PrivateTopics {
-		if ts == "*" || ts == topic {
-			return true
+					break
+				}
+			}
 		}
 
-		r := s.PrivateRegexps[i]
-		if r != nil && r.MatchString(topic) {
+		if subscribed && canAccess {
 			return true
 		}
 	}
@@ -199,20 +223,14 @@ func (s *Subscriber) MatchTopic(topic string, private bool) (match bool) {
 
 // Match checks if the current subscriber can receive the given update.
 func (s *Subscriber) Match(u *Update) bool {
-	for _, t := range u.Topics {
-		if s.MatchTopic(t, u.Private) {
-			return true
-		}
-	}
-
-	return false
+	return s.MatchTopics(u.Topics, u.Private)
 }
 
 // getSubscriptions return the list of subscriptions associated to this subscriber.
 func (s *Subscriber) getSubscriptions(topic, context string, active bool) []subscription {
 	var subscriptions []subscription //nolint:prealloc
-	for k, t := range s.Topics {
-		if topic != "" && !s.MatchTopic(topic, false) {
+	for k, t := range s.SubscribedTopics {
+		if topic != "" && (!s.MatchTopics([]string{topic}, false) || t != topic) {
 			continue
 		}
 
@@ -240,16 +258,26 @@ func (s *Subscriber) MarshalLogObject(enc zapcore.ObjectEncoder) error {
 	if s.RemoteAddr != "" {
 		enc.AddString("remote_addr", s.RemoteAddr)
 	}
-	if s.PrivateTopics != nil {
-		if err := enc.AddArray("topic_selectors", stringArray(s.PrivateTopics)); err != nil {
+	if s.AllowedPrivateTopics != nil {
+		if err := enc.AddArray("topic_selectors", stringArray(s.AllowedPrivateTopics)); err != nil {
 			return fmt.Errorf("log error: %w", err)
 		}
 	}
-	if s.Topics != nil {
-		if err := enc.AddArray("topics", stringArray(s.Topics)); err != nil {
+	if s.SubscribedTopics != nil {
+		if err := enc.AddArray("topics", stringArray(s.SubscribedTopics)); err != nil {
 			return fmt.Errorf("log error: %w", err)
 		}
 	}
 
 	return nil
+}
+
+// handleFullChan disconnects the subscriber when the out channel is full.
+func (s *Subscriber) handleFullChan() {
+	atomic.StoreInt32(&s.disconnected, 1)
+	s.outMutex.Unlock()
+
+	if c := s.logger.Check(zap.ErrorLevel, "subscriber unable to receive updates fast enough"); c != nil {
+		c.Write(zap.Object("subscriber", s))
+	}
 }
